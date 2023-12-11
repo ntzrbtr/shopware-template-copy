@@ -4,14 +4,8 @@ declare(strict_types=1);
 
 namespace Netzarbeiter\Shopware\TemplateCopy\Command;
 
-use Composer\IO\NullIO;
 use Shopware\Core\Framework\Context;
-use Shopware\Core\Framework\DataAbstractionLayer\EntityRepository;
-use Shopware\Core\Framework\DataAbstractionLayer\Search\Criteria;
-use Shopware\Core\Framework\DataAbstractionLayer\Search\Filter\EqualsFilter;
-use Shopware\Core\Framework\DataAbstractionLayer\Search\Filter\NotFilter;
-use Shopware\Core\Framework\Plugin\PluginEntity;
-use Shopware\Core\Framework\Plugin\PluginLifecycleService;
+use Shopware\Core\Framework\Plugin\Exception\PluginNotFoundException;
 use Shopware\Core\Framework\Plugin\PluginService;
 use Symfony\Component\Console\Input\InputArgument;
 use Symfony\Component\Console\Input\InputInterface;
@@ -43,6 +37,13 @@ class CopyCommand extends \Symfony\Component\Console\Command\Command
     protected static $defaultDescription = 'Copy template files from one plugin to another';
 
     /**
+     * Context
+     *
+     * @var Context
+     */
+    protected Context $context;
+
+    /**
      * Style for input/output
      *
      * @var SymfonyStyle
@@ -50,20 +51,19 @@ class CopyCommand extends \Symfony\Component\Console\Command\Command
     protected SymfonyStyle $io;
 
     /**
-     * Working directory
-     *
-     * @var string
-     */
-    protected string $workingDir;
-
-    /**
      * CopyCommand constructor.
+     *
+     * @param PluginService $pluginService
      */
-    public function __construct()
+    public function __construct(protected PluginService $pluginService)
     {
         parent::__construct();
 
-        $this->workingDir = getcwd();
+        // Create context.
+        $this->context = Context::createDefaultContext();
+        $this->context->addState(
+            \Shopware\Core\Framework\DataAbstractionLayer\Indexing\EntityIndexerRegistry::DISABLE_INDEXING
+        );
     }
 
     /**
@@ -79,12 +79,12 @@ class CopyCommand extends \Symfony\Component\Console\Command\Command
             ->addArgument(
                 self::ARGUMENT_SOURCE,
                 InputArgument::REQUIRED,
-                'Path to source plugin'
+                'Source plugin'
             )
             ->addArgument(
                 self::ARGUMENT_TARGET,
                 InputArgument::REQUIRED,
-                'Path to target plugin'
+                'Target plugin'
             )
             ->addOption(
                 self::OPTION_MODE,
@@ -123,24 +123,28 @@ class CopyCommand extends \Symfony\Component\Console\Command\Command
         // Print plugin title.
         $this->io->title(sprintf('%s (%s)', $this->getDescription(), $this->getName()));
 
-        // Check source path.
-        $sourcePath = $input->getArgument(self::ARGUMENT_SOURCE);
-        if (!is_dir($sourcePath)) {
-            $this->io->error(sprintf('Source path "%s" is not a directory', $sourcePath));
+        // Check source plugin.
+        $sourceName = $input->getArgument(self::ARGUMENT_SOURCE);
+        try {
+            $sourcePlugin = $this->pluginService->getPluginByName($sourceName, $this->context);
+        } catch (PluginNotFoundException $e) {
+            $this->io->error(sprintf('Source plugin "%s" not found', $sourceName));
             return self::FAILURE;
         }
-        $sourcePath = realpath($sourcePath);
+        $sourcePath = $sourcePlugin->getPath();
 
-        // Check target path.
-        $targetPath = $input->getArgument(self::ARGUMENT_TARGET);
-        if (!is_dir($targetPath)) {
-            $this->io->error(sprintf('Target path "%s" is not a directory', $targetPath));
+        // Check target plugin.
+        $targetName = $input->getArgument(self::ARGUMENT_TARGET);
+        try {
+            $targetPlugin = $this->pluginService->getPluginByName($targetName, $this->context);
+        } catch (PluginNotFoundException $e) {
+            $this->io->error(sprintf('Target plugin "%s" not found', $targetName));
             return self::FAILURE;
         }
-        $targetPath = realpath($targetPath);
+        $targetPath = $targetPlugin->getPath();
 
         // Check if source and target are different.
-        if ($sourcePath === $targetPath) {
+        if ($sourcePlugin->getId() === $targetPlugin->getId()) {
             $this->io->error('Source and target are the same');
             return self::FAILURE;
         }
@@ -152,12 +156,20 @@ class CopyCommand extends \Symfony\Component\Console\Command\Command
             return self::FAILURE;
         }
 
+        // Print summary of what is to be done.
+        $this->io->definitionList(
+            ['Source' => $sourcePlugin->getName()],
+            ['Target' => $targetPlugin->getName()],
+            ['Mode' => ucfirst($mode)],
+            ['Replace?' => $input->getOption(self::OPTION_REPLACE) ? 'Yes' : 'No']
+        );
+
         // Print warning on dry run.
         if ($input->getOption(self::OPTION_DRY_RUN)) {
             $this->io->warning('Dry run, no files will be touched');
         }
 
-        // Find all template files in target.
+        // Find all template files in source plugin.
         $finder = new \Symfony\Component\Finder\Finder();
         $finder->files()->in($sourcePath . '/src/Resources/views/storefront/')->name('*.html.twig');
 
@@ -167,34 +179,28 @@ class CopyCommand extends \Symfony\Component\Console\Command\Command
             // Get target file.
             $targetFile = str_replace($sourcePath, $targetPath, $sourceFile->getPathname());
 
-            // Get action for display.
-            $action = match ($mode) {
-                self::MODE_EXTEND => 'Extend',
-                self::MODE_OVERRIDE => 'Override',
+            // Is the file being replaced, skipped or none of those?
+            $action = match(true) {
+                file_exists($targetFile) && !$input->getOption(self::OPTION_REPLACE) => 'Skipped',
+                file_exists($targetFile) && $input->getOption(self::OPTION_REPLACE) => 'Replaced',
+                default => 'Copied',
             };
-            if (file_exists($targetFile)) {
-                if ($input->getOption(self::OPTION_REPLACE)) {
-                    $action .= ' (replaced)';
-                } else {
-                    $action .= ' (skipped)';
-                }
-            }
 
-            // Perform action.
+            // Handle the file.
             if (!$input->getOption(self::OPTION_DRY_RUN)) {
                 // Check if target file exists.
                 if (!file_exists($targetFile) || $input->getOption(self::OPTION_REPLACE)) {
                     match ($mode) {
-                        self::MODE_EXTEND => $this->extend($targetFile, $sourceFile->getPathname(), $sourcePath),
-                        self::MODE_OVERRIDE => $this->override($targetFile, $sourceFile->getPathname(), $sourcePath),
+                        self::MODE_EXTEND => $this->extend($targetFile, $sourceFile->getPathname(), $sourcePlugin),
+                        self::MODE_OVERRIDE => $this->override($targetFile, $sourceFile->getPathname(), $sourcePlugin),
                     };
                 }
             }
 
             // Collect table row.
             $rows[] = [
-                $this->stripWorkingDir($sourceFile->getPathname()),
-                $this->stripWorkingDir($targetFile),
+                $this->getPluginPath($sourcePlugin, $sourceFile->getPathname()),
+                $this->getPluginPath($targetPlugin, $targetFile),
                 $action,
             ];
         }
@@ -204,14 +210,19 @@ class CopyCommand extends \Symfony\Component\Console\Command\Command
     }
 
     /**
-     * Strip the working directory from the given path.
+     * Get path inside of plugin in template style.
      *
+     * @param \Shopware\Core\Framework\Plugin\PluginEntity $plugin
      * @param string $path
      * @return string
      */
-    protected function stripWorkingDir(string $path): string
+    protected function getPluginPath(\Shopware\Core\Framework\Plugin\PluginEntity $plugin, string $path): string
     {
-        return str_replace($this->workingDir . '/', '', $path);
+        return sprintf(
+            '@%s/storefront/%s',
+            $plugin->getName(),
+            str_replace($plugin->getPath() . '/src/Resources/views/storefront/', '', $path)
+        );
     }
 
     /**
@@ -219,17 +230,17 @@ class CopyCommand extends \Symfony\Component\Console\Command\Command
      *
      * @param string $target
      * @param string $source
-     * @param string $base
+     * @param \Shopware\Core\Framework\Plugin\PluginEntity $base
      */
-    protected function extend(string $target, string $source, string $base): void
+    protected function extend(string $target, string $source, \Shopware\Core\Framework\Plugin\PluginEntity $base): void
     {
         $this->ensureDirectoryExists(dirname($target));
 
-        $path = str_replace($base . '/src/Resources/views/storefront/', '', $source);
+        $path = str_replace('@' . $base->getName(), '@Storefront', $this->getPluginPath($base, $source));
         $content = <<<EOT
 {# This file was generated by the netzarbeiter:template:copy command #}
 
-{% sw_extends '@Storefront/storefront/$path' %}
+{% sw_extends '$path' %}
 
 EOT;
         file_put_contents($target, $content);
@@ -240,14 +251,14 @@ EOT;
      *
      * @param string $target
      * @param string $source
-     * @param string $base
+     * @param \Shopware\Core\Framework\Plugin\PluginEntity $base
      */
-    protected function override(string $target, string $source, string $base): void
+    protected function override(string $target, string $source, \Shopware\Core\Framework\Plugin\PluginEntity $base): void
     {
         $this->ensureDirectoryExists(dirname($target));
 
         $original = file_get_contents($source);
-        $path = str_replace(dirname($base) . '/', '', $source);
+        $path = $this->getPluginPath($base, $source);
         $content = <<<EOT
 {# This file was generated by the netzarbeiter:template:copy command #}
 
