@@ -6,7 +6,7 @@ running with template adjustments as quickly as possible.
 ## Usage
 
 ```bash
-bin/console netzarbeiter:template:copy <source> <target>
+bin/console netzarbeiter:template:copy <source plugin> <target plugin>
 ```
 
 ### Options
@@ -14,7 +14,7 @@ bin/console netzarbeiter:template:copy <source> <target>
 #### `--mode=<mode>`
 
 Operation mode:
-- 'extend' for extending files (using 'sw_extend'); this is the default
+- 'extend' for extending files (using 'sw_extends'); this is the default
 - 'override' for overriding files (copy full file contents)
 
 #### `--replace`

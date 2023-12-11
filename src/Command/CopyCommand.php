@@ -73,7 +73,7 @@ class CopyCommand extends \Symfony\Component\Console\Command\Command
     {
         $modeExtend = self::MODE_EXTEND;
         $modeOverride = self::MODE_OVERRIDE;
-        $modeDescription = "Mode: '$modeExtend' for extending files (using 'sw_extend'), '$modeOverride' for overriding files (copy full file contents)";
+        $modeDescription = "Mode: '$modeExtend' for extending files (using 'sw_extends'), '$modeOverride' for overriding files (copy full file contents)";
 
         $this
             ->addArgument(
