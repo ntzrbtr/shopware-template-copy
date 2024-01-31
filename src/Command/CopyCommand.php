@@ -51,13 +51,22 @@ class CopyCommand extends \Symfony\Component\Console\Command\Command
     protected SymfonyStyle $io;
 
     /**
+     * Plugin service
+     *
+     * @var PluginService
+     */
+    protected PluginService $pluginService;
+
+    /**
      * CopyCommand constructor.
      *
      * @param PluginService $pluginService
      */
-    public function __construct(protected PluginService $pluginService)
+    public function __construct(PluginService $pluginService)
     {
         parent::__construct();
+
+        $this->pluginService = $pluginService;
 
         // Create context.
         $this->context = Context::createDefaultContext();
